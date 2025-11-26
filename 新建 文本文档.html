@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>AI 手势控制 3D 地球 - 操控感优化版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Arial', sans-serif; }
+        #info {
+            position: absolute;
+            top: 20px;
+            width: 100%;
+            text-align: center;
+            color: #00ffcc;
+            text-shadow: 0 0 10px #00ffcc;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #webcam {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 240px;
+            height: 180px;
+            transform: scaleX(-1); /* 镜像翻转，让你看自己像照镜子 */
+            border: 2px solid #00ffcc;
+            border-radius: 10px;
+            opacity: 0.7;
+            z-index: 10;
+        }
+        #loading {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 24px;
+            text-shadow: 0 0 20px cyan;
+        }
+        .instruction { font-size: 14px; color: #aaa; margin-top: 5px;}
+    </style>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="loading">正在初始化 AI 视觉引擎与 3D 宇宙...<br><span style="font-size:16px">请允许摄像头权限</span></div>
+    <div id="info">
+        <h1>🌍 手势控制地球仪 (方向修正版)</h1>
+        <div class="instruction">✋ <b>手掌移动</b>：旋转地球 | 👌 <b>拇指食指张开/捏合</b>：缩放地球</div>
+    </div>
+    <video id="webcam" autoplay playsinline></video>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        // --- 全局变量 ---
+        let scene, camera, renderer;
+        let earthMesh, cloudMesh, atmosphereMesh, starMesh;
+        let handLandmarker;
+        let video = document.getElementById('webcam');
+        let targetRotationX = 0;
+        let targetRotationY = 0;
+        let targetZoom = 2.5; 
+        
+        // --- 1. 初始化 Three.js 场景 ---
+        function initScene() {
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = targetZoom;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.outputColorSpace = THREE.SRGBColorSpace;
+            document.body.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0x333333);
+            scene.add(ambientLight);
+            const sunLight = new THREE.DirectionalLight(0xffffff, 2.0);
+            sunLight.position.set(5, 3, 5);
+            scene.add(sunLight);
+            
+            // --- 材质加载 ---
+            const textureLoader = new THREE.TextureLoader();
+            
+            // 地球
+            const earthGeo = new THREE.SphereGeometry(1, 64, 64);
+            const earthMat = new THREE.MeshPhongMaterial({
+                map: textureLoader.load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg'),
+                bumpMap: textureLoader.load('https://unpkg.com/three-globe/example/img/earth-topology.png'),
+                bumpScale: 0.05,
+                specularMap: textureLoader.load('https://unpkg.com/three-globe/example/img/earth-water.png'),
+                specular: new THREE.Color('grey')
+            });
+            earthMesh = new THREE.Mesh(earthGeo, earthMat);
+            scene.add(earthMesh);
+
+            // 云层
+            const cloudGeo = new THREE.SphereGeometry(1.02, 64, 64);
+            const cloudMat = new THREE.MeshPhongMaterial({
+                map: textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/earth_clouds_1024.png'),
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                side: THREE.DoubleSide
+            });
+            cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
+            scene.add(cloudMesh);
+
+            // 大气层光晕 Shader
+            const atmosphereGeo = new THREE.SphereGeometry(1.2, 64, 64);
+            const vertexShader = `
+                varying vec3 vNormal;
+                void main() {
+                    vNormal = normalize(normalMatrix * normal);
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `;
+            const fragmentShader = `
+                varying vec3 vNormal;
+                void main() {
+                    float intensity = pow(0.6 - dot(vNormal, vec3(0, 0, 1.0)), 4.0);
+                    gl_FragColor = vec4(0.3, 0.6, 1.0, 1.0) * intensity;
+                }
+            `;
+            const atmosphereMat = new THREE.ShaderMaterial({
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader,
+                blending: THREE.AdditiveBlending,
+                side: THREE.BackSide,
+                transparent: true
+            });
+            atmosphereMesh = new THREE.Mesh(atmosphereGeo, atmosphereMat);
+            scene.add(atmosphereMesh);
+
+            // 星空
+            const starGeo = new THREE.BufferGeometry();
+            const starCount = 2000;
+            const posArray = new Float32Array(starCount * 3);
+            for(let i = 0; i < starCount * 3; i++) {
+                posArray[i] = (Math.random() - 0.5) * 50; 
+            }
+            starGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            const starMat = new THREE.PointsMaterial({size: 0.02, color: 0xffffff});
+            starMesh = new THREE.Points(starGeo, starMat);
+            scene.add(starMesh);
+        }
+
+        // --- 2. 初始化 MediaPipe ---
+        async function initHandTracking() {
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+            );
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                    delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numHands: 1
+            });
+
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", predictWebcam);
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        // --- 3. 核心交互逻辑 (已修改反转) ---
+        let lastVideoTime = -1;
+        async function predictWebcam() {
+            if (video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                const startTimeMs = performance.now();
+                
+                if (handLandmarker) {
+                    const result = handLandmarker.detectForVideo(video, startTimeMs);
+                    
+                    if (result.landmarks && result.landmarks.length > 0) {
+                        const landmarks = result.landmarks[0];
+                        
+                        // 中指根部 (Index 9) 作为手掌中心
+                        const handX = landmarks[9].x; 
+                        const handY = landmarks[9].y; 
+                        
+                        // --- 修改部分 ---
+                        // 原来是: (handX - 0.5) * 5
+                        // 现在反转: (0.5 - handX) * 5
+                        // 这样你的手往右（屏幕视觉上的右），地球就往右转
+                        targetRotationY = (0.5 - handX) * 5; 
+                        
+                        targetRotationX = (handY - 0.5) * 5;
+
+                        // 缩放控制 (拇指+食指)
+                        const thumbTip = landmarks[4];
+                        const indexTip = landmarks[8];
+                        const distance = Math.sqrt(
+                            Math.pow(thumbTip.x - indexTip.x, 2) + 
+                            Math.pow(thumbTip.y - indexTip.y, 2)
+                        );
+                        
+                        // 缩放映射
+                        const zoomFactor = Math.max(0.5, 5.0 - (distance * 15)); 
+                        targetZoom = zoomFactor;
+                    }
+                }
+            }
+            window.requestAnimationFrame(predictWebcam);
+        }
+
+        // --- 4. 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (earthMesh) {
+                // 平滑插值
+                // 自动自转保留微小速度
+                earthMesh.rotation.y += 0.002; 
+                
+                // 跟随手势平滑过渡
+                earthMesh.rotation.y += (targetRotationY - earthMesh.rotation.y % (Math.PI*2)) * 0.05;
+                earthMesh.rotation.x += (targetRotationX - earthMesh.rotation.x) * 0.05;
+
+                // 云层同步
+                cloudMesh.rotation.y += 0.0025;
+                cloudMesh.rotation.x = earthMesh.rotation.x;
+
+                // 缩放平滑过渡
+                const clampedZoom = Math.max(1.5, Math.min(5.0, targetZoom));
+                camera.position.z += (clampedZoom - camera.position.z) * 0.1;
+            }
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        initScene();
+        initHandTracking();
+        animate();
+    </script>
+</body>
+</html>
